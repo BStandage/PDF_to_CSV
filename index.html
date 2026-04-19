@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PDF → CSV</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -54,12 +55,6 @@
     .upload-zone strong { color: #e2e8f0; }
     input[type=file] { display: none; }
 
-    .options-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
-    @media (max-width: 540px) { .options-grid { grid-template-columns: 1fr; } }
     label.field { display: flex; flex-direction: column; gap: 0.35rem; }
     label.field span { font-size: 0.8rem; color: #94a3b8; }
     label.field input[type=text] {
@@ -72,7 +67,6 @@
       width: 100%;
     }
     label.field input[type=text]:focus { outline: none; border-color: #60a5fa; }
-    .options-grid .full { grid-column: 1 / -1; }
 
     .progress-bar {
       background: #0f172a;
@@ -103,17 +97,9 @@
       transition: opacity 0.15s;
     }
     .btn:hover { opacity: 0.85; }
-    .btn-ghost {
-      background: #334155;
-      background-image: none;
-    }
+    .btn-ghost { background: #334155; background-image: none; }
 
-    .stats {
-      color: #64748b;
-      font-size: 0.8rem;
-      text-align: center;
-      margin-bottom: 0.75rem;
-    }
+    .stats { color: #64748b; font-size: 0.8rem; text-align: center; margin-bottom: 0.75rem; }
     .preview-wrap {
       overflow: auto;
       max-height: 480px;
@@ -138,13 +124,7 @@
       color: #cbd5e1;
     }
     tr:hover td { background: #1e293b; }
-    .preview-note {
-      text-align: center;
-      padding: 0.6rem;
-      color: #475569;
-      font-size: 0.78rem;
-    }
-
+    .preview-note { text-align: center; padding: 0.6rem; color: #475569; font-size: 0.78rem; }
     .hidden { display: none !important; }
   </style>
 </head>
@@ -153,33 +133,27 @@
 <h1>PDF → CSV</h1>
 <p class="subtitle">Runs entirely in your browser — no uploads, no server</p>
 
-<!-- Upload -->
 <div class="card" id="upload-card">
   <div class="upload-zone" id="drop-zone">
     <div class="upload-icon">📄</div>
     <p><strong>Drop a PDF here</strong> or click to choose a file</p>
-    <p style="margin-top:0.4rem;font-size:0.82rem">Handles multi-page PDFs</p>
+    <p style="margin-top:0.4rem;font-size:0.82rem">Handles multi-page &amp; scanned PDFs</p>
   </div>
   <input type="file" id="file-input" accept=".pdf">
 </div>
 
-<!-- Options -->
 <div class="card hidden" id="options-card">
-  <div class="options-grid">
-    <label class="field full">
-      <span>Column headers (comma-separated) — leave blank to auto-detect from first row</span>
-      <input type="text" id="custom-headers" placeholder="e.g. Phone, Title, First Name, Last Name, Address, City, State, Zip">
-    </label>
-  </div>
+  <label class="field">
+    <span>Column headers (comma-separated) — leave blank to use auto-detected columns</span>
+    <input type="text" id="custom-headers" placeholder="e.g. Phone, Title, First Name, Last Name, Address, City, State, Zip">
+  </label>
 </div>
 
-<!-- Progress -->
 <div class="card hidden" id="progress-card">
   <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
   <div id="progress-label">Loading...</div>
 </div>
 
-<!-- Actions -->
 <div class="card hidden" id="actions-card">
   <div class="btn-row">
     <button class="btn" id="download-btn">⬇ Download CSV</button>
@@ -187,7 +161,6 @@
   </div>
 </div>
 
-<!-- Preview -->
 <div class="card hidden" id="preview-card">
   <div class="stats" id="stats"></div>
   <div class="preview-wrap" id="preview"></div>
@@ -200,8 +173,8 @@
   const dropZone  = document.getElementById('drop-zone');
   const fileInput = document.getElementById('file-input');
   let gridData = [];
+  let ocrWorker = null;
 
-  // --- Drag & drop ---
   dropZone.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', e => e.target.files[0] && handleFile(e.target.files[0]));
   dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -228,9 +201,10 @@
 
     try {
       const buffer = await file.arrayBuffer();
-      setProgress(5, `Loading ${file.name}…`);
+      setProgress(2, `Loading ${file.name}…`);
       const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
       gridData = await extractGrid(pdf);
+      if (ocrWorker) { await ocrWorker.terminate(); ocrWorker = null; }
       show('options-card');
       show('actions-card');
       showPreview(gridData);
@@ -239,53 +213,59 @@
     } catch (err) {
       setProgress(0, '❌ ' + err.message);
       console.error(err);
+      if (ocrWorker) { await ocrWorker.terminate(); ocrWorker = null; }
     }
   }
 
-  // --- PDF extraction ---
+  // --- PDF extraction with OCR fallback ---
   async function extractGrid(pdf) {
     const total = pdf.numPages;
     const allItems = [];
 
     for (let p = 1; p <= total; p++) {
-      setProgress(5 + (p / total) * 75, `Reading page ${p} of ${total}…`);
+      setProgress(5 + (p / total) * 80, `Page ${p} of ${total}…`);
       const page = await pdf.getPage(p);
       const vp = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
       const yOffset = (p - 1) * 100000;
 
-      // Collect raw items and detect skew from transform matrices
-      const pageItems = [];
-      for (const item of content.items) {
-        const text = item.str.trim();
-        if (!text) continue;
-        const [a, b, , , e, f] = item.transform;
-        pageItems.push({ text, rawX: e, rawY: vp.height - f, angle: Math.atan2(b, a) });
-      }
-      if (!pageItems.length) continue;
+      // Check if this page has real embedded text
+      const textItems = content.items.filter(i => i.str.trim());
 
-      // Median angle = page skew estimate
-      const sorted = [...pageItems].map(i => i.angle).sort((a, b) => a - b);
-      const skew = sorted[Math.floor(sorted.length / 2)];
-      const cos = Math.cos(-skew), sin = Math.sin(-skew);
-
-      for (const item of pageItems) {
-        const { rawX: rx, rawY: ry } = item;
-        allItems.push({
-          text: item.text,
-          x: Math.round(rx * cos - ry * sin),
-          y: yOffset + Math.round(rx * sin + ry * cos),
+      if (textItems.length > 5) {
+        // Native text path — deskew using transform matrix rotation angle
+        const raw = textItems.map(item => {
+          const [a, b, , , e, f] = item.transform;
+          return { text: item.str.trim(), rawX: e, rawY: vp.height - f, angle: Math.atan2(b, a) };
         });
+        const skew = median(raw.map(i => i.angle));
+        const cos = Math.cos(-skew), sin = Math.sin(-skew);
+        for (const item of raw) {
+          allItems.push({
+            text: item.text,
+            x: Math.round(item.rawX * cos - item.rawY * sin),
+            y: yOffset + Math.round(item.rawX * sin + item.rawY * cos),
+          });
+        }
+      } else {
+        // Scanned image — use OCR
+        setProgress(5 + (p / total) * 80, `Page ${p} of ${total} (OCR)…`);
+        const words = await ocrPage(page, vp, p, total);
+        for (const w of words) {
+          allItems.push({ text: w.text, x: w.x, y: yOffset + w.y });
+        }
       }
     }
 
-    setProgress(82, 'Detecting columns…');
+    if (!allItems.length) throw new Error('No text could be extracted from this PDF.');
+
+    setProgress(88, 'Detecting columns…');
     allItems.sort((a, b) => a.y - b.y || a.x - b.x);
 
-    const rows = groupRows(allItems, 4);
+    const rows = groupRows(allItems, 5);
     const colCenters = findColumns(allItems.map(i => i.x), 18);
 
-    setProgress(90, 'Building grid…');
+    setProgress(93, 'Building grid…');
 
     const grid = rows.map(row => {
       const cells = new Array(colCenters.length).fill('');
@@ -296,14 +276,41 @@
       return cells;
     }).filter(row => row.some(Boolean));
 
-    // Drop columns that are entirely empty across all rows
+    // Drop entirely-empty columns
     const keep = colCenters.map((_, ci) => grid.some(row => row[ci]));
-    const trimmed = grid.map(row => row.filter((_, ci) => keep[ci]));
-
-    setProgress(99, 'Done!');
-    return trimmed;
+    return grid.map(row => row.filter((_, ci) => keep[ci]));
   }
 
+  async function ocrPage(page, vp, pageNum, total) {
+    // Render page to canvas at 2x for better OCR accuracy
+    const scale = 2;
+    const scaledVp = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = scaledVp.width;
+    canvas.height = scaledVp.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: scaledVp }).promise;
+
+    if (!ocrWorker) {
+      setProgress(5 + (pageNum / total) * 80, 'Initializing OCR engine…');
+      ocrWorker = await Tesseract.createWorker('eng', 1, {
+        workerPath: 'https://unpkg.com/tesseract.js@5/dist/worker.min.js',
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        corePath: 'https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js',
+      });
+    }
+
+    const { data } = await ocrWorker.recognize(canvas);
+
+    return data.words
+      .filter(w => w.text.trim())
+      .map(w => ({
+        text: w.text.trim(),
+        x: Math.round(w.bbox.x0 / scale),
+        y: Math.round(w.bbox.y0 / scale),
+      }));
+  }
+
+  // --- Helpers ---
   function groupRows(items, tol) {
     const rows = [];
     let cur = [], refY = null;
@@ -341,6 +348,11 @@
     return bi;
   }
 
+  function median(arr) {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  }
+
   // --- CSV & preview ---
   function buildCSV(grid) {
     const customHdrs = document.getElementById('custom-headers').value.trim();
@@ -354,15 +366,10 @@
 
   function showPreview(grid) {
     const customHdrs = document.getElementById('custom-headers').value.trim();
-    let headers, rows;
-
-    if (customHdrs) {
-      headers = customHdrs.split(',').map(h => h.trim());
-      rows = grid;
-    } else {
-      headers = grid[0]?.map((_, i) => `Col ${i + 1}`) || [];
-      rows = grid;
-    }
+    const headers = customHdrs
+      ? customHdrs.split(',').map(h => h.trim())
+      : grid[0]?.map((_, i) => `Col ${i + 1}`) || [];
+    const rows = grid;
 
     document.getElementById('stats').textContent =
       `${rows.length.toLocaleString()} rows × ${headers.length} columns`;
@@ -376,10 +383,8 @@
     const limit = Math.min(rows.length, 300);
     for (let i = 0; i < limit; i++) {
       const tr = tbody.insertRow();
-      const r = rows[i];
       for (let j = 0; j < headers.length; j++) {
-        const td = tr.insertCell();
-        td.textContent = r[j] ?? '';
+        tr.insertCell().textContent = rows[i][j] ?? '';
       }
     }
 
@@ -389,19 +394,16 @@
     if (rows.length > limit) {
       const note = document.createElement('p');
       note.className = 'preview-note';
-      note.textContent = `Showing first ${limit} of ${rows.length.toLocaleString()} rows — all rows included in download`;
+      note.textContent = `Showing first ${limit} of ${rows.length.toLocaleString()} rows — all rows in download`;
       wrap.appendChild(note);
     }
   }
 
   function downloadCSV() {
-    const csv = buildCSV(gridData);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([buildCSV(gridData)], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'converted.csv';
-    a.click();
+    a.href = url; a.download = 'converted.csv'; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
@@ -414,7 +416,6 @@
     ['options-card','actions-card','preview-card','progress-card'].forEach(hide);
   }
 
-  // --- Helpers ---
   function show(id) { document.getElementById(id).classList.remove('hidden'); }
   function hide(id) { document.getElementById(id).classList.add('hidden'); }
   function setProgress(pct, msg) {
