@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF → CSV</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 0.4rem;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle {
+      text-align: center;
+      color: #64748b;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 1rem;
+      padding: 1.5rem;
+      max-width: 720px;
+      margin: 0 auto 1.5rem;
+    }
+    .upload-zone {
+      border: 2px dashed #334155;
+      border-radius: 0.75rem;
+      padding: 3rem 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: #60a5fa;
+      background: rgba(96,165,250,0.05);
+    }
+    .upload-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+    .upload-zone p { color: #94a3b8; line-height: 1.6; }
+    .upload-zone strong { color: #e2e8f0; }
+    input[type=file] { display: none; }
+
+    .options-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 540px) { .options-grid { grid-template-columns: 1fr; } }
+    label.field { display: flex; flex-direction: column; gap: 0.35rem; }
+    label.field span { font-size: 0.8rem; color: #94a3b8; }
+    label.field input[type=text] {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+      color: #e2e8f0;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      width: 100%;
+    }
+    label.field input[type=text]:focus { outline: none; border-color: #60a5fa; }
+    .options-grid .full { grid-column: 1 / -1; }
+
+    .progress-bar {
+      background: #0f172a;
+      border-radius: 9999px;
+      height: 6px;
+      overflow: hidden;
+      margin-bottom: 0.5rem;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+      border-radius: 9999px;
+      transition: width 0.25s ease;
+      width: 0%;
+    }
+    #progress-label { color: #94a3b8; font-size: 0.85rem; text-align: center; }
+
+    .btn-row { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      border: none;
+      border-radius: 0.5rem;
+      color: white;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.7rem 1.75rem;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-ghost {
+      background: #334155;
+      background-image: none;
+    }
+
+    .stats {
+      color: #64748b;
+      font-size: 0.8rem;
+      text-align: center;
+      margin-bottom: 0.75rem;
+    }
+    .preview-wrap {
+      overflow: auto;
+      max-height: 480px;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+    }
+    table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.78rem; }
+    th {
+      background: #1e293b;
+      color: #60a5fa;
+      padding: 0.5rem 0.75rem;
+      position: sticky;
+      top: 0;
+      text-align: left;
+      white-space: nowrap;
+      border-bottom: 1px solid #334155;
+    }
+    td {
+      padding: 0.35rem 0.75rem;
+      border-bottom: 1px solid #1a2740;
+      white-space: nowrap;
+      color: #cbd5e1;
+    }
+    tr:hover td { background: #1e293b; }
+    .preview-note {
+      text-align: center;
+      padding: 0.6rem;
+      color: #475569;
+      font-size: 0.78rem;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<h1>PDF → CSV</h1>
+<p class="subtitle">Runs entirely in your browser — no uploads, no server</p>
+
+<!-- Upload -->
+<div class="card" id="upload-card">
+  <div class="upload-zone" id="drop-zone">
+    <div class="upload-icon">📄</div>
+    <p><strong>Drop a PDF here</strong> or click to choose a file</p>
+    <p style="margin-top:0.4rem;font-size:0.82rem">Handles multi-page PDFs</p>
+  </div>
+  <input type="file" id="file-input" accept=".pdf">
+</div>
+
+<!-- Options -->
+<div class="card hidden" id="options-card">
+  <div class="options-grid">
+    <label class="field full">
+      <span>Column headers (comma-separated) — leave blank to auto-detect from first row</span>
+      <input type="text" id="custom-headers" placeholder="e.g. Phone, Title, First Name, Last Name, Address, City, State, Zip">
+    </label>
+  </div>
+</div>
+
+<!-- Progress -->
+<div class="card hidden" id="progress-card">
+  <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+  <div id="progress-label">Loading...</div>
+</div>
+
+<!-- Actions -->
+<div class="card hidden" id="actions-card">
+  <div class="btn-row">
+    <button class="btn" id="download-btn">⬇ Download CSV</button>
+    <button class="btn btn-ghost" id="reset-btn">Upload Another</button>
+  </div>
+</div>
+
+<!-- Preview -->
+<div class="card hidden" id="preview-card">
+  <div class="stats" id="stats"></div>
+  <div class="preview-wrap" id="preview"></div>
+</div>
+
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  const dropZone  = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  let gridData = [];
+
+  // --- Drag & drop ---
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => e.target.files[0] && handleFile(e.target.files[0]));
+  dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f?.type === 'application/pdf') handleFile(f);
+  });
+
+  document.getElementById('download-btn').addEventListener('click', downloadCSV);
+  document.getElementById('reset-btn').addEventListener('click', reset);
+  document.getElementById('custom-headers').addEventListener('input', () => {
+    if (gridData.length) showPreview(gridData);
+  });
+
+  // --- Main flow ---
+  async function handleFile(file) {
+    show('progress-card');
+    hide('actions-card');
+    hide('preview-card');
+    hide('options-card');
+
+    try {
+      const buffer = await file.arrayBuffer();
+      setProgress(5, `Loading ${file.name}…`);
+      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+      gridData = await extractGrid(pdf);
+      show('options-card');
+      show('actions-card');
+      showPreview(gridData);
+      show('preview-card');
+      hide('progress-card');
+    } catch (err) {
+      setProgress(0, '❌ ' + err.message);
+      console.error(err);
+    }
+  }
+
+  // --- PDF extraction ---
+  async function extractGrid(pdf) {
+    const total = pdf.numPages;
+    const allItems = [];
+
+    for (let p = 1; p <= total; p++) {
+      setProgress(5 + (p / total) * 75, `Reading page ${p} of ${total}…`);
+      const page = await pdf.getPage(p);
+      const vp = page.getViewport({ scale: 1 });
+      const content = await page.getTextContent();
+      const yOffset = (p - 1) * 100000;
+
+      // Collect raw items and detect skew from transform matrices
+      const pageItems = [];
+      for (const item of content.items) {
+        const text = item.str.trim();
+        if (!text) continue;
+        const [a, b, , , e, f] = item.transform;
+        pageItems.push({ text, rawX: e, rawY: vp.height - f, angle: Math.atan2(b, a) });
+      }
+      if (!pageItems.length) continue;
+
+      // Median angle = page skew estimate
+      const sorted = [...pageItems].map(i => i.angle).sort((a, b) => a - b);
+      const skew = sorted[Math.floor(sorted.length / 2)];
+      const cos = Math.cos(-skew), sin = Math.sin(-skew);
+
+      for (const item of pageItems) {
+        const { rawX: rx, rawY: ry } = item;
+        allItems.push({
+          text: item.text,
+          x: Math.round(rx * cos - ry * sin),
+          y: yOffset + Math.round(rx * sin + ry * cos),
+        });
+      }
+    }
+
+    setProgress(82, 'Detecting columns…');
+    allItems.sort((a, b) => a.y - b.y || a.x - b.x);
+
+    const rows = groupRows(allItems, 4);
+    const colCenters = findColumns(allItems.map(i => i.x), 18);
+
+    setProgress(90, 'Building grid…');
+
+    const grid = rows.map(row => {
+      const cells = new Array(colCenters.length).fill('');
+      for (const item of row) {
+        const ci = nearest(colCenters, item.x);
+        cells[ci] = cells[ci] ? cells[ci] + ' ' + item.text : item.text;
+      }
+      return cells;
+    }).filter(row => row.some(Boolean));
+
+    // Drop columns that are entirely empty across all rows
+    const keep = colCenters.map((_, ci) => grid.some(row => row[ci]));
+    const trimmed = grid.map(row => row.filter((_, ci) => keep[ci]));
+
+    setProgress(99, 'Done!');
+    return trimmed;
+  }
+
+  function groupRows(items, tol) {
+    const rows = [];
+    let cur = [], refY = null;
+    for (const item of items) {
+      if (refY === null || Math.abs(item.y - refY) > tol) {
+        if (cur.length) rows.push(cur);
+        cur = [item];
+        refY = item.y;
+      } else {
+        cur.push(item);
+      }
+    }
+    if (cur.length) rows.push(cur);
+    return rows;
+  }
+
+  function findColumns(xs, gap) {
+    const sorted = [...new Set(xs)].sort((a, b) => a - b);
+    const clusters = [];
+    let cluster = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] - sorted[i - 1] > gap) { clusters.push(cluster); cluster = []; }
+      cluster.push(sorted[i]);
+    }
+    clusters.push(cluster);
+    return clusters.map(c => Math.round(c.reduce((a, b) => a + b, 0) / c.length));
+  }
+
+  function nearest(arr, val) {
+    let bi = 0, bd = Math.abs(arr[0] - val);
+    for (let i = 1; i < arr.length; i++) {
+      const d = Math.abs(arr[i] - val);
+      if (d < bd) { bd = d; bi = i; }
+    }
+    return bi;
+  }
+
+  // --- CSV & preview ---
+  function buildCSV(grid) {
+    const customHdrs = document.getElementById('custom-headers').value.trim();
+    const lines = [];
+    if (customHdrs) lines.push(customHdrs);
+    for (const row of grid) {
+      lines.push(row.map(c => '"' + c.replace(/"/g, '""') + '"').join(','));
+    }
+    return lines.join('\r\n');
+  }
+
+  function showPreview(grid) {
+    const customHdrs = document.getElementById('custom-headers').value.trim();
+    let headers, rows;
+
+    if (customHdrs) {
+      headers = customHdrs.split(',').map(h => h.trim());
+      rows = grid;
+    } else {
+      headers = grid[0]?.map((_, i) => `Col ${i + 1}`) || [];
+      rows = grid;
+    }
+
+    document.getElementById('stats').textContent =
+      `${rows.length.toLocaleString()} rows × ${headers.length} columns`;
+
+    const table = document.createElement('table');
+    const thead = table.createTHead();
+    const hrow = thead.insertRow();
+    headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; hrow.appendChild(th); });
+
+    const tbody = table.createTBody();
+    const limit = Math.min(rows.length, 300);
+    for (let i = 0; i < limit; i++) {
+      const tr = tbody.insertRow();
+      const r = rows[i];
+      for (let j = 0; j < headers.length; j++) {
+        const td = tr.insertCell();
+        td.textContent = r[j] ?? '';
+      }
+    }
+
+    const wrap = document.getElementById('preview');
+    wrap.innerHTML = '';
+    wrap.appendChild(table);
+    if (rows.length > limit) {
+      const note = document.createElement('p');
+      note.className = 'preview-note';
+      note.textContent = `Showing first ${limit} of ${rows.length.toLocaleString()} rows — all rows included in download`;
+      wrap.appendChild(note);
+    }
+  }
+
+  function downloadCSV() {
+    const csv = buildCSV(gridData);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'converted.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function reset() {
+    gridData = [];
+    fileInput.value = '';
+    document.getElementById('preview').innerHTML = '';
+    document.getElementById('stats').textContent = '';
+    document.getElementById('custom-headers').value = '';
+    ['options-card','actions-card','preview-card','progress-card'].forEach(hide);
+  }
+
+  // --- Helpers ---
+  function show(id) { document.getElementById(id).classList.remove('hidden'); }
+  function hide(id) { document.getElementById(id).classList.add('hidden'); }
+  function setProgress(pct, msg) {
+    document.getElementById('progress-fill').style.width = pct + '%';
+    document.getElementById('progress-label').textContent = msg;
+  }
+</script>
+</body>
+</html>
