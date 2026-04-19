@@ -162,8 +162,8 @@
     .hidden { display: none !important; }
   </style>
 </head>
-<canvas id="stars-canvas"></canvas>
 <body>
+<canvas id="stars-canvas"></canvas>
 
 <div class="hero">
   <img src="monkey_dance.gif" alt="moon monkey" class="mascot">
@@ -320,8 +320,8 @@
   }
 
   async function ocrPage(page, vp, pageNum, total) {
-    // Render page to canvas at 2x for better OCR accuracy
-    const scale = 2;
+    // 1.5x is fast enough for clean scans; 2x roughly doubles processing time
+    const scale = 1.5;
     const scaledVp = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = scaledVp.width;
@@ -330,9 +330,10 @@
 
     if (!ocrWorker) {
       setProgress(5 + (pageNum / total) * 80, 'Initializing OCR engine…');
+      // OEM 1 = LSTM only (faster than combined mode)
       ocrWorker = await Tesseract.createWorker('eng', 1, {
         workerPath: 'https://unpkg.com/tesseract.js@5/dist/worker.min.js',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
         corePath: 'https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js',
       });
     }
