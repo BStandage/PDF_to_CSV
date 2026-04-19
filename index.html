@@ -258,7 +258,7 @@
   // --- PDF extraction with OCR fallback ---
   async function extractGrid(pdf) {
     const total = pdf.numPages;
-    const allItems = [];
+    const allItems = []; // each item is a { text, x, y } phrase/cell
 
     for (let p = 1; p <= total; p++) {
       setProgress(5 + (p / total) * 80, `Page ${p} of ${total}…`);
@@ -267,11 +267,10 @@
       const content = await page.getTextContent();
       const yOffset = (p - 1) * 100000;
 
-      // Check if this page has real embedded text
       const textItems = content.items.filter(i => i.str.trim());
 
       if (textItems.length > 5) {
-        // Native text path — deskew using transform matrix rotation angle
+        // Native text: deskew via transform matrix angle, each item is already a word/token
         const raw = textItems.map(item => {
           const [a, b, , , e, f] = item.transform;
           return { text: item.str.trim(), rawX: e, rawY: vp.height - f, angle: Math.atan2(b, a) };
@@ -286,11 +285,11 @@
           });
         }
       } else {
-        // Scanned image — use OCR
         setProgress(5 + (p / total) * 80, `Page ${p} of ${total} (OCR)…`);
-        const words = await ocrPage(page, vp, p, total);
-        for (const w of words) {
-          allItems.push({ text: w.text, x: w.x, y: yOffset + w.y });
+        // OCR path returns pre-merged phrases (not individual words)
+        const phrases = await ocrPage(page, vp, p, total);
+        for (const ph of phrases) {
+          allItems.push({ text: ph.text, x: ph.x, y: yOffset + ph.y });
         }
       }
     }
@@ -300,7 +299,7 @@
     setProgress(88, 'Detecting columns…');
     allItems.sort((a, b) => a.y - b.y || a.x - b.x);
 
-    const rows = groupRows(allItems, 5);
+    const rows = groupRows(allItems, 6);
     const colCenters = findColumns(allItems.map(i => i.x), 18);
 
     setProgress(93, 'Building grid…');
@@ -314,13 +313,11 @@
       return cells;
     }).filter(row => row.some(Boolean));
 
-    // Drop entirely-empty columns
     const keep = colCenters.map((_, ci) => grid.some(row => row[ci]));
     return grid.map(row => row.filter((_, ci) => keep[ci]));
   }
 
   async function ocrPage(page, vp, pageNum, total) {
-    // 1.5x is fast enough for clean scans; 2x roughly doubles processing time
     const scale = 1.5;
     const scaledVp = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
@@ -330,7 +327,6 @@
 
     if (!ocrWorker) {
       setProgress(5 + (pageNum / total) * 80, 'Initializing OCR engine…');
-      // OEM 1 = LSTM only (faster than combined mode)
       ocrWorker = await Tesseract.createWorker('eng', 1, {
         workerPath: 'https://unpkg.com/tesseract.js@5/dist/worker.min.js',
         langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
@@ -340,13 +336,50 @@
 
     const { data } = await ocrWorker.recognize(canvas);
 
-    return data.words
-      .filter(w => w.text.trim())
-      .map(w => ({
-        text: w.text.trim(),
-        x: Math.round(w.bbox.x0 / scale),
-        y: Math.round(w.bbox.y0 / scale),
-      }));
+    // Compute a dynamic column-gap threshold from all inter-word gaps on this page.
+    // Gaps smaller than threshold = words in the same cell; larger = column boundary.
+    const allGaps = [];
+    for (const line of data.lines) {
+      const ws = line.words.filter(w => w.text.trim()).sort((a, b) => a.bbox.x0 - b.bbox.x0);
+      for (let i = 1; i < ws.length; i++) {
+        const g = (ws[i].bbox.x0 - ws[i - 1].bbox.x1) / scale;
+        if (g > 0) allGaps.push(g);
+      }
+    }
+    allGaps.sort((a, b) => a - b);
+    const medGap = allGaps.length ? allGaps[Math.floor(allGaps.length / 2)] : 6;
+    // Column gaps are typically 3-6x the normal word spacing
+    const colGapThreshold = Math.max(medGap * 3.5, 14);
+
+    // Merge words into phrases per Tesseract line.
+    // Using data.lines ensures words on the same visual row share the same y value,
+    // preventing one logical row from fragmenting into multiple CSV rows.
+    const phrases = [];
+    for (const line of data.lines) {
+      const ws = line.words.filter(w => w.text.trim()).sort((a, b) => a.bbox.x0 - b.bbox.x0);
+      if (!ws.length) continue;
+
+      const lineY = Math.round(line.bbox.y0 / scale);
+      let cur = null;
+
+      for (const w of ws) {
+        const x0 = w.bbox.x0 / scale;
+        const x1 = w.bbox.x1 / scale;
+        const t  = w.text.trim();
+        if (!cur) {
+          cur = { text: t, x: x0, x1 };
+        } else if (x0 - cur.x1 < colGapThreshold) {
+          cur.text += ' ' + t;
+          cur.x1 = x1;
+        } else {
+          phrases.push({ text: cur.text, x: Math.round(cur.x), y: lineY });
+          cur = { text: t, x: x0, x1 };
+        }
+      }
+      if (cur) phrases.push({ text: cur.text, x: Math.round(cur.x), y: lineY });
+    }
+
+    return phrases;
   }
 
   // --- Helpers ---
